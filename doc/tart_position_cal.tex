@@ -66,7 +66,7 @@ The global orientation of the array cannot be determined from distance measureme
 
 This is accomplished by identifying an antenna that has a radial vector that aligns with a distant identifiable landmark visible on satellite imagery (e.g. Google Maps). The geographic coordinates (latitude and longitude) of both the phase-centre and the landmark are recorded, and from these two geographic coordinates, the expected bearing $\theta_k$ of the reference antenna $k$ is computed as an inverse geodesic problem . The tart-position-cal package described in Section~\ref{sec:software}, provides a function to do this.
 
-This $\theta_k$ measurement is supplied to the least-squares procedure as $L_\theta$ in Equation~4, described below.
+This $\theta_k$ measurement is supplied to the least-squares procedure as $L_\theta$ in Equation~\ref{eq:combined}, described below.
 
 The global orientation estimate is refined as part of the continuous interferometric calibration that is performed during normal telescope operation~\cite{moltenocalibratoion}.
 
@@ -91,6 +91,7 @@ The differences between the simulated measurements and the actual measurements a
 As we wish to minimize each of these estimators, we form a combined estimator $L(\{x_i, y_i\})$ from their weighted sum:
 \begin{align}
 	L(\{x_i, y_i\}) = w_r\, L_r(\{x_i, y_i\}) + L_{ij}(\{x_i, y_i\}) + \lambda\, L_\theta(\{x_i, y_i\}) + \gamma\, L_\chi
+	\label{eq:combined}
 \end{align}
 Here $w_r$ up-weights the radial residuals (default $w_r = 10$, reflecting that the single-ended radial distances are measured more reliably than the pairwise ones), $\lambda \sim 100$ constrains the global rotation, and $\gamma \sim 10^6$ applies the one-sided chirality penalty $L_\chi$ that breaks the reflection degeneracy (see \S\ref{sec:symmetries}). The pairwise sum $L_{ij}$ runs over the $\tfrac{1}{2}N(N-1)$ unique antenna pairs (276 for $N=24$), counting each measured distance once. When no chirality constraint is requested, $L_\chi = 0$.
 
@@ -129,7 +130,7 @@ This results in a list of residuals.
 
 \subsection{Residuals and Iterative Refinement}
 
-If one or more of the residuals are large, it usually indicates that the associated measurement is not consistent with the other measurements. These measurements that result in large residuals are repeated and the corresponding measurements are repeated. The algorithm is then re-run with the corrected measurements to achieve a new set of residuals. This iterative process continues until all residuals fall below an acceptable threshold. A flow-chart of this is shown in Figure~\ref{fig:flowchart}.
+If one or more of the residuals are large, it usually indicates that the associated measurement is not consistent with the other measurements. Measurements that result in large residuals are flagged and re-measured, then the algorithm is re-run with the corrected measurements to achieve a new set of residuals. This iterative process continues until all residuals fall below an acceptable threshold; a flow-chart of this is shown in Figure~\ref{fig:flowchart}. For the UNAM deployment, four rounds of outlier flagging and re-measurement were required.
 
 \begin{figure}[ht]
 	\centering
@@ -178,13 +179,13 @@ The distance measurements $r_i$ and $\delta_{ij}$ alone do not fully determine t
 
 \begin{enumerate}
 	\item \textbf{Translation.} Shifting all antennas by a common vector leaves all pairwise distances unchanged. This is resolved by fixing the phase-centre at $(0,0)$, since all radial distances $r_i$ are measured relative to this point.
-	\item \textbf{Rotation.} Rotating the entire array about the phase-centre preserves all $r_i$ and $\delta_{ij}$. This is resolved by the geographic bearing constraint $\theta_k$ (Equation~4), which pins one reference antenna to a known direction.
+	\item \textbf{Rotation.} Rotating the entire array about the phase-centre preserves all $r_i$ and $\delta_{ij}$. This is resolved by the geographic bearing constraint $\theta_k$ (Equation~\ref{eq:combined}), which pins one reference antenna to a known direction.
 	\item \textbf{Reflection (chirality).} Reflecting the array across any line through the origin preserves all distances. The single bearing constraint $\theta_k$ does \emph{not} eliminate this degeneracy: a reflection across the line at bearing $\theta_k$ maps the reference antenna to the same bearing, producing an identical value of $L(x,y)$. The true configuration and its mirror image are therefore degenerate global minima of the unconstrained problem.
 \end{enumerate}
 
 To break the reflection degeneracy, the \texttt{tart-position-cal} package provides a \emph{chirality constraint}, invoked with the \texttt{--chirality-index} flag. A second antenna $c$, not collinear with the reference antenna $k$, is chosen. The cross product $\mathbf{p}_k \times \mathbf{p}_c = x_k y_c - y_k x_c$ encodes the chirality (handedness) of the configuration. The correct sign $s = \pm 1$ is specified explicitly by the operator via the \texttt{--chirality-sign} CLI flag (\texttt{positive} $= +1$, \texttt{negative} $= -1$), determined from an on-site observation of the as-built array rather than inferred from the initial position estimates. A one-sided penalty is applied if the optimizer attempts to flip that sign. Normalized by the measured radial distances $r_k r_c$, the penalty is dimensionless and uses a default weight of $10^6$, acting as an effective hard constraint. In IRLS mode, the chirality residual is excluded from the Tukey/Huber reweighting so that it is never relaxed by the robust weighting scheme.
 
-With the phase-centre, bearing constraint, and chirality constraint all active, the six degrees of freedom of the rigid transformation group in the plane are fully eliminated, and the global antenna positions are uniquely determined.
+With the phase-centre, bearing constraint, and chirality constraint all active, the three degrees of freedom of the rigid transformation group in the plane are fully eliminated, and the global antenna positions are uniquely determined.
 
 \paragraph{Choosing the chirality antenna and sign.}
 The chirality antenna $c$ should lie on a different spiral arm from the reference antenna $k$, as close to a right angle from the reference bearing as possible.  Antennas near the reference bearing line (or its 180$^\circ$ opposite) produce a fragile, easily-flipped signal and should be avoided.
@@ -206,7 +207,7 @@ The CLI is invoked as \texttt{tart-position-cal} and accepts the following princ
 	\item \texttt{--api}: Alternatively, a TART telescope API base URL from which initial positions can be fetched directly (e.g.\ \texttt{https://api.elec.ac.nz/tart/na-unam}).
 	\item \texttt{--output}: Path for the calibrated antenna positions JSON output file.
 	\item \texttt{--rot-index} and \texttt{--rot-degrees}: Specify the reference antenna and its geographic bearing for the global rotation constraint.
-	\item \texttt{--chirality-index}: Antenna index used to break the reflection (chirality) degeneracy.  The sign of $\mathbf{p}_k \times \mathbf{p}_c$ from the initial positions is enforced as a soft constraint (see \S\ref{sec:symmetries}).  Requires \texttt{--rot-index}.
+	\item \texttt{--chirality-index}: Antenna index used with \texttt{--chirality-sign} to break the reflection (chirality) degeneracy.  The sign must be determined from the as-built array, not inferred from the initial positions (see \S\ref{sec:symmetries}).  Requires \texttt{--chirality-sign}.
 	\item \texttt{--irls}: Enable Iteratively Reweighted Least Squares for robust calibration (see \S\ref{sec:irls}).
 	\item \texttt{--irls-weight-fn}: Weight function for IRLS: \texttt{tukey} (Tukey's bisquare, default) or \texttt{huber}.
 	\item \texttt{--irls-max-iter}: Maximum IRLS outer iterations (default 10).
@@ -274,19 +275,19 @@ The optimizer converged after 20 iterations, reducing the cost function from $3.
 		7       & $1.195$  & $0.207$  \\
 		8       & $1.476$  & $0.002$  \\
 		9       & $1.674$  & $-0.287$ \\
-		10      & $0.248$  & $-0.231$ \\
+		10      & $0.247$  & $-0.231$ \\
 		11      & $0.517$  & $-0.654$ \\
 		12      & $0.562$  & $-1.066$ \\
 		13      & $0.456$  & $-1.398$ \\
 		14      & $0.246$  & $-1.679$ \\
 		15      & $-0.144$ & $-0.299$ \\
-		16      & $-0.465$ & $-0.685$ \\
+		16      & $-0.465$ & $-0.684$ \\
 		17      & $-0.845$ & $-0.853$ \\
-		18      & $-1.194$ & $-0.851$ \\
-		19      & $-1.523$ & $-0.733$ \\
+		18      & $-1.193$ & $-0.851$ \\
+		19      & $-1.522$ & $-0.733$ \\
 		20      & $-0.797$ & $0.241$  \\
-		21      & $-1.074$ & $0.550$  \\
-		22      & $-1.182$ & $0.882$  \\
+		21      & $-1.074$ & $0.551$  \\
+		22      & $-1.181$ & $0.882$  \\
 		23      & $-1.173$ & $1.232$  \\
 		\hline
 	\end{tabular}
@@ -305,7 +306,7 @@ The residuals of the pairwise distance measurements after calibration are shown 
 
 \begin{table}[h]
 	\centering
-	\caption{Largest residuals (exceeding the 90th percentile of 1.65~mm) from the UNAM calibration. Negative residuals indicate that the measured distance was smaller than the calibrated distance.}
+	\caption{The fifteen largest residuals from the UNAM calibration (all exceed the 90th percentile of 1.65~mm). Negative residuals indicate that the measured distance was smaller than the calibrated distance.}
 	\label{tab:large_residuals}
 	\begin{tabular}{rrr}
 		\hline
@@ -335,7 +336,7 @@ The residuals of the pairwise distance measurements after calibration are shown 
 
 When survey measurements contain outliers---erroneous distance readings from misaligned tape measures or transcription errors---ordinary least squares can be skewed by those bad measurements. To address this, the \texttt{tart-position-cal} package includes an Iteratively Reweighted Least Squares (IRLS) option, invoked with the \texttt{--irls} flag. IRLS solves a series of weighted least-squares problems, recomputing per-measurement weights after each iteration to down-weight outliers. Two weight functions are available: Tukey's bisquare (default), which zeros out clear outliers entirely, and Huber, which caps the influence of outliers with a saturating linear penalty.
 
-Applying IRLS with Tukey weights to the UNAM data reduced the inter-antenna residual statistics: median absolute deviation from 0.63~mm to 0.49~mm, standard deviation from 1.11~mm to 1.11~mm, 50th percentile from 0.59~mm to 0.49~mm, and 90th percentile from 1.65~mm to 1.44~mm. The outer loop converged in 4 iterations. Note that while these robust statistics improve, the unweighted objective $L(x,y)$ rises from $4.35\times 10^2$ to $5.40\times 10^2$, because the outliers that dominate it are precisely those that IRLS down-weights. Figure~\ref{fig:irls_residuals} shows the residual histogram for the IRLS calibration. Compared to the manual iterative re-measurement workflow, IRLS provides a more robust solution, though manual verification of flagged outlier pairs is still required, fewer measurements need to be redone.
+Applying IRLS with Tukey weights to the UNAM data reduced the inter-antenna residual statistics: median absolute deviation from 0.63~mm to 0.49~mm, standard deviation from 1.11~mm to 1.11~mm, 50th percentile from 0.59~mm to 0.49~mm, and 90th percentile from 1.65~mm to 1.44~mm. Note that while these robust statistics improve, the unweighted objective $L(x,y)$ rises from $4.35\times 10^2$ to $5.40\times 10^2$, because the outliers that dominate it are precisely those that IRLS down-weights. Figure~\ref{fig:irls_residuals} shows the residual histogram for the IRLS calibration. Compared to the manual iterative re-measurement workflow, IRLS provides a more robust solution, though manual verification of flagged outlier pairs is still required, fewer measurements need to be redone.
 
 \begin{figure}
 	\includegraphics[width=\linewidth]{fig/irls_residual_histogram.png}
