@@ -47,6 +47,7 @@ tart-position-cal \
 | Option | Description |
 |--------|-------------|
 | `--measurements` | Path to .ods file with antenna distance measurements (required) |
+| `--sheet` | Worksheet holding the measurements (default: `Sheet1`) |
 | `--positions` | Path to JSON file with initial antenna positions in metres |
 | `--api` | TART API base URL to fetch initial positions from |
 | `--api-timeout` | Network timeout in seconds for `--api` requests (default: 30) |
@@ -63,6 +64,10 @@ tart-position-cal \
 | `--irls-weight-fn` | Weight function for IRLS: `tukey` (bisquare) or `huber` (default: `tukey`) |
 | `--irls-max-iter` | Maximum IRLS outer iterations (default: 10) |
 | `--title` | Optional prefix prepended to all output file names (e.g. `na-unam`) |
+| `--team COLOUR=NAME` | Name the survey team whose cells have background `COLOUR` (repeatable). See [Per-team statistics](#per-team-statistics). |
+| `--exclude LIST` | Leave measurements out of the fit (`rN` = radius of antenna N, `I-J` = pair), e.g. `r18,r19,3-12`; repeatable. They are still scored in the per-team statistics. |
+| `--no-teams` | Skip the per-team statistics |
+| `--measurements-csv` | Write a per-measurement table (team, residual, leverage, corrected error) to this CSV |
 
 ### Determining the chirality sign
 
@@ -94,6 +99,13 @@ deployment.
 **Measurements** (.ods spreadsheet):
 - Row 0: distance from each antenna to the reference point
 - Rows 1..N: inter-antenna distance matrix
+
+Blank cells are allowed anywhere, radius row included, so a survey still in
+progress can be calibrated (an antenna with fewer than three measurements
+draws a warning).  A cell carrying a field annotation, such as `499**`, is
+read as its leading number with a warning.  A Google Sheet can be used
+directly: *File → Download → OpenDocument (.ods)* keeps the cell colours
+needed for the per-team statistics.
 
 **Initial positions** (JSON):
 ```json
@@ -144,6 +156,48 @@ weights after each solve to down-weight outliers.  Two weight functions are avai
 
 The outer loop stops when the parameter vector stops moving (`< 1e-4` mm) or after
 `--irls-max-iter` iterations (default 10).
+
+### Per-team statistics
+
+When the survey is split between teams and each team's cells are marked by
+their background colour, the report ends with a per-team league table.
+Teams are found from the colours automatically (common colours get names
+such as `red` or `blue`); `--team '#ff0000=Team Rocket'` gives them proper
+names.
+
+```
+Per-team measurement quality
+  ...
+  Inter-antenna distances (mm), ranked by RMS error:
+  Rank  Team              N  chk  median     RMS     p90     max outliers
+     1  red              16   16    0.75    1.04    1.78    1.92        0
+     2  blue             14   13    0.50    3.04    6.39    7.57        2
+     3  green            39   37    0.63  152.34    2.09  699.90        3
+```
+
+The statistics are of each measurement's *estimated error*, the residual
+divided by `sqrt(1 - h)`, where `h` is the measurement's leverage in the
+fit.  Raw residuals would flatter a team that measured only the bare
+minimum: a measurement that is the sole constraint on an antenna is fitted
+exactly, and so has a zero residual, however wrong it is.  Such
+measurements (redundancy `1 - h < 0.1`) are counted in `N` but left out of
+the statistics (`chk` counts those that remain).  An *outlier* is a
+checked measurement whose error exceeds three robust standard deviations of
+all checked inter-antenna errors.  Teams are ranked by RMS error, so a few
+gross blunders sink a team even if its typical measurement is good.  Run
+with `--irls` when there are blunders, so that they do not distort the
+solution, and everyone else's residuals with it.
+
+`team_residuals.png` shows one histogram per team on a single plot, each
+drawn as an outline in the team's colour, with the outlier limits marked.
+The per-measurement CSV (`--measurements-csv`) has an `outlier` column.
+
+IRLS cannot rescue an antenna whose only measurements are the bad ones:
+there, the bad measurements form the minimal set, fit exactly, and push the
+good ones out as "outliers".  The tell-tale is a cluster of same-signed
+outliers on one antenna.  Leave the suspect measurements out with
+`--exclude` and check that the cluster disappears; the excluded
+measurements are still charged to their team.
 
 ## Example: UNAM site (Namibia)
 

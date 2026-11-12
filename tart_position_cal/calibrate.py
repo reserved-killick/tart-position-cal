@@ -6,6 +6,7 @@ to be consistent with the measured distances.
 """
 
 import json
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -77,19 +78,45 @@ def _p(x, i):
     return [x[_i_x(i)], x[_i_y(i)]]
 
 
-def load_measurements(path):
+def _to_mm(value, where):
+    """Coerce one spreadsheet cell to a float (mm), or NaN if blank.
+
+    Survey sheets are filled in by hand in the field, so a cell may carry
+    stray annotations (``"499**"``, ``"1250 ?"``).  The leading number is
+    kept and a warning printed; a cell with no number at all is an error.
+    """
+    if value is None:
+        return np.nan
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    text = str(value).strip()
+    if text == "":
+        return np.nan
+    m = re.match(r"^[+-]?\d+(\.\d*)?", text)
+    if m is None:
+        raise ValueError(f"Cannot read a distance from {text!r} at {where}")
+    print(f"WARNING: {where}: read {text!r} as {m.group(0)} mm")
+    return float(m.group(0))
+
+
+def load_measurements(path, sheet="Sheet1"):
     """Load antenna distance measurements from an ODS spreadsheet.
 
     Returns ``(radius, m_ij, n_ant)`` where:
     - *radius*: measured distance from each antenna to the reference point
+      (NaN where not measured)
     - *m_ij*: NxN matrix of inter-antenna distances (NaN where unmeasured)
     - *n_ant*: number of antennas
+
+    *sheet* names the worksheet holding the measurements (default
+    ``"Sheet1"``).  Blank cells are allowed anywhere, so a partially
+    completed survey can be calibrated.
     """
     import pandas as pd
 
     cols = [f"A {i}" for i in range(24)]
     try:
-        data = pd.read_excel(path, "Sheet1", usecols=cols)
+        data = pd.read_excel(path, sheet, usecols=cols)
     except FileNotFoundError as exc:
         raise FileNotFoundError(
             f"Cannot read measurements from {path!r}: file not found"
@@ -98,13 +125,15 @@ def load_measurements(path):
         # pandas raises ValueError for a missing sheet or an unreadable format.
         raise ValueError(
             f"Could not read measurements from {path!r}: {exc}. "
-            f"Expected an ODS spreadsheet with a sheet named 'Sheet1'."
+            f"Expected an ODS spreadsheet with a sheet named {sheet!r}."
         ) from exc
 
     if len(data) < 1:
         raise ValueError(f"Measurements file {path!r} has no data rows")
-    radius = data.loc[0].to_numpy(dtype=float)
-    n_ant = len(radius)
+    n_ant = len(data.columns)
+    radius = np.array(
+        [_to_mm(data.iloc[0, j], f"radius of {data.columns[j]}") for j in range(n_ant)]
+    )
 
     if len(data) < n_ant + 1:
         raise ValueError(
@@ -115,7 +144,8 @@ def load_measurements(path):
 
     m_ij = np.zeros((n_ant, n_ant))
     for i in range(n_ant):
-        m_ij[i, :] = data.loc[i + 1]
+        for j in range(n_ant):
+            m_ij[i, j] = _to_mm(data.iloc[i + 1, j], f"A {i} to A {j}")
 
     for i in range(n_ant):
         for j in range(n_ant):
@@ -123,6 +153,49 @@ def load_measurements(path):
                 m_ij[j, i] = m_ij[i, j]
 
     return radius, m_ij, n_ant
+
+
+def parse_exclusions(specs, n_ant):
+    """Parse measurement exclusions such as ``["r18,r19", "3-12"]``.
+
+    ``rN`` names the radius of antenna N and ``I-J`` the distance between
+    antennas I and J.  Items may be comma- or space-separated.  Returns
+    ``(radii, pairs)``: a set of antenna indices and a set of ``(i, j)``
+    tuples with ``i < j``.
+    """
+    radii, pairs = set(), set()
+    for spec in specs or []:
+        for item in re.split(r"[,\s]+", spec.strip()):
+            if not item:
+                continue
+            m_r = re.fullmatch(r"[rR](\d+)", item)
+            m_p = re.fullmatch(r"[aA]?(\d+)-[aA]?(\d+)", item)
+            if m_r:
+                idx = (int(m_r.group(1)),)
+                radii.add(idx[0])
+            elif m_p:
+                idx = tuple(sorted((int(m_p.group(1)), int(m_p.group(2)))))
+                if idx[0] == idx[1]:
+                    raise ValueError(f"Exclusion {item!r} names the same antenna twice")
+                pairs.add(idx)
+            else:
+                raise ValueError(
+                    f"Cannot parse exclusion {item!r}: use rN for a radius or I-J for a pair"
+                )
+            if max(idx) >= n_ant:
+                raise ValueError(f"Exclusion {item!r} is out of range for {n_ant} antennas")
+    return radii, pairs
+
+
+def apply_exclusions(radius, m_ij, radii, pairs):
+    """Return copies of *radius* and *m_ij* with the excluded measurements blanked."""
+    radius = np.array(radius, dtype=float)
+    m_ij = np.array(m_ij, dtype=float)
+    for i in radii:
+        radius[i] = np.nan
+    for i, j in pairs:
+        m_ij[i, j] = m_ij[j, i] = np.nan
+    return radius, m_ij
 
 
 def load_initial_positions(path):
@@ -241,10 +314,12 @@ class _Problem:
         """Flat residual vector with term weights baked in (unweighted by IRLS)."""
         res = np.zeros(self.n_total)
         # Radius residuals
+        # (an unmeasured radius contributes a constant zero)
         for i in range(self.n_ant):
-            res[i] = self.sqrt_radius_weight * (
-                dist(self.center, _p(x, i)) - self.radius[i]
-            )
+            if not np.isnan(self.radius[i]):
+                res[i] = self.sqrt_radius_weight * (
+                    dist(self.center, _p(x, i)) - self.radius[i]
+                )
         # Inter-antenna residuals (one entry per unique pair)
         for k, (i, j) in enumerate(self.pairs):
             res[self.n_radius + k] = dist(_p(x, i), _p(x, j)) - self.pair_values[k]
@@ -366,7 +441,15 @@ def _build_problem(
                 "doc/SYMMETRY.md."
             )
         expected_chirality_sign = float(chirality_sign)
-        chirality_norm = radius[rot_index] * radius[chirality_index]
+        # Normalise by the radii; fall back on the initial guess for a
+        # radius that has not been measured (partial surveys).
+        r_ref = radius[rot_index]
+        r_chi = radius[chirality_index]
+        if np.isnan(r_ref):
+            r_ref = np.hypot(x_ref, y_ref)
+        if np.isnan(r_chi):
+            r_chi = np.hypot(x_chi, y_chi)
+        chirality_norm = r_ref * r_chi
 
     return _Problem(
         n_ant=n_ant,
@@ -629,8 +712,14 @@ def calibrate_irls(
 
         # Update weights from measurement residuals only (rotation and
         # chirality are priors, not noisy data, so they stay at weight 1).
+        # Unmeasured radii (constant-zero rows) are kept out of the robust
+        # scale estimate so a partial survey does not shrink the MAD.
         raw_res = prob.combined_residuals(new_x)
-        weights[:n_meas] = weight_fn(raw_res[:n_meas])
+        measured = np.ones(n_meas, dtype=bool)
+        measured[: prob.n_radius] = ~np.isnan(prob.radius)
+        meas_weights = np.ones(n_meas)
+        meas_weights[measured] = weight_fn(raw_res[:n_meas][measured])
+        weights[:n_meas] = meas_weights
 
         shift = np.max(np.abs(new_x - prev_x))
         prev_x = new_x
@@ -669,6 +758,7 @@ def compute_residuals(result, radius, m_ij, n_ant):
     """
     x = result.x
 
+    # NaN where the radius was not measured
     r_res = np.array([dist((0, 0), _p(x, i)) - radius[i] for i in range(n_ant)])
 
     pairs = []
@@ -727,15 +817,37 @@ def plot_differences(initial, final, outpath):
     plt.close(fig)
 
 
-def plot_residual_histogram(ij_residuals, outpath):
-    """Save a histogram of inter-antenna distance residuals."""
+def plot_residual_histogram(ij_residuals, outpath, n_sigma=3.0):
+    """Save a histogram of inter-antenna distance residuals.
+
+    The axis spans twice the outlier limit (*n_sigma* robust standard
+    deviations, from the MAD) either side of zero.  Residuals beyond it are
+    piled into the end bins and counted in the title, so a few gross
+    blunders do not squash the spread of the rest.
+    """
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots()
-    ax.hist(ij_residuals, bins="fd")
-    ax.set_title("Histogram of residuals")
-    ax.set_xlabel("Residual (mm)")
-    ax.grid(True)
+    res = np.asarray(ij_residuals, dtype=float)
+    sigma = 1.4826 * np.median(np.abs(res - np.median(res))) if len(res) else 0.0
+    limit = n_sigma * sigma
+    span = 2.0 * limit if limit > 0 else (np.max(np.abs(res)) if len(res) else 1.0)
+    span = max(span, 1e-3)
+    n_beyond = int(np.sum(np.abs(res) > span))
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.hist(np.clip(res, -span, span), bins=np.linspace(-span, span, 41),
+            color="#8899aa", edgecolor="black", linewidth=0.5)
+    if limit > 0:
+        for x in (-limit, limit):
+            ax.axvline(x, color="black", linestyle="--", linewidth=0.8)
+    title = f"Inter-antenna residuals (n={len(res)}, robust sigma {sigma:.2f} mm)"
+    if n_beyond:
+        title += f"\n({n_beyond} beyond \u00b1{span:.1f} mm are piled into the end bins)"
+    ax.set_title(title)
+    ax.set_xlabel(f"Residual (mm); dashed lines: \u00b1{n_sigma:.0f} sigma")
+    ax.set_ylabel("number of measurements")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
     fig.savefig(outpath)
     plt.close(fig)
 
@@ -746,7 +858,10 @@ def print_residual_report(result, radius, m_ij, n_ant):
 
     print("Radius residuals (mm):")
     for i in range(n_ant):
-        print(f"  Ant {i:2d}: {r_res[i]:+7.2f}")
+        if np.isnan(r_res[i]):
+            print(f"  Ant {i:2d}:  (not measured)")
+        else:
+            print(f"  Ant {i:2d}: {r_res[i]:+7.2f}")
 
     abs_ij = np.abs(ij_res)
     mad = np.median(np.abs(ij_res - np.median(ij_res)))

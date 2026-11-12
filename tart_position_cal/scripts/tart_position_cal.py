@@ -5,19 +5,32 @@ import json
 import os
 import sys
 
+import numpy as np
+
 from tart_position_cal.calibrate import (
+    apply_exclusions,
     calibrate,
     calibrate_irls,
     compute_residuals,
     fetch_initial_positions,
     load_initial_positions,
     load_measurements,
+    parse_exclusions,
     plot_differences,
     plot_positions,
     plot_residual_histogram,
     print_residual_report,
     result_to_json,
     result_to_positions,
+)
+from tart_position_cal.teams import (
+    NO_COLOUR,
+    load_cell_colours,
+    measurement_table,
+    parse_team_names,
+    plot_team_residuals,
+    print_team_report,
+    write_measurements_csv,
 )
 
 
@@ -29,6 +42,38 @@ def main():
         "--measurements",
         required=True,
         help="Path to .ods file with antenna distance measurements.",
+    )
+    parser.add_argument(
+        "--sheet",
+        default="Sheet1",
+        help="Name of the worksheet holding the measurements (default: Sheet1).",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        metavar="LIST",
+        help="Leave measurements out of the fit: rN for the radius of antenna "
+        "N, I-J for the distance between antennas I and J, comma-separated "
+        "(e.g. 'r18,r19,3-12'). Repeatable. Excluded measurements are still "
+        "scored in the per-team statistics.",
+    )
+    parser.add_argument(
+        "--team",
+        action="append",
+        metavar="COLOUR=NAME",
+        help="Name the team whose cells have background COLOUR, e.g. "
+        "'#ff0000=Team Red'. Repeat for each team. Teams are found from the "
+        "cell colours either way; this only sets the names shown.",
+    )
+    parser.add_argument(
+        "--no-teams",
+        action="store_true",
+        help="Skip the per-team statistics, even if the cells are colour-coded.",
+    )
+    parser.add_argument(
+        "--measurements-csv",
+        help="Write a per-measurement table (team, residual, leverage, "
+        "corrected error) to this CSV file.",
     )
     parser.add_argument(
         "--positions",
@@ -127,8 +172,25 @@ def main():
 
     # --- Load measurements ---
     print(f"Loading measurements from {args.measurements}")
-    radius, m_ij, n_ant = load_measurements(args.measurements)
-    print(f"  Found {n_ant} antennas")
+    radius, m_ij, n_ant = load_measurements(args.measurements, sheet=args.sheet)
+    radius_all, m_ij_all = radius, m_ij
+    excl_radii, excl_pairs = parse_exclusions(args.exclude, n_ant)
+    if excl_radii or excl_pairs:
+        radius, m_ij = apply_exclusions(radius, m_ij, excl_radii, excl_pairs)
+        names = [f"r{i}" for i in sorted(excl_radii)] + [f"{i}-{j}" for i, j in sorted(excl_pairs)]
+        print(f"  Excluding from the fit: {', '.join(names)}")
+    n_pairs = int(np.sum(~np.isnan(m_ij[np.triu_indices(n_ant, 1)])))
+    n_rad = int(np.sum(~np.isnan(radius)))
+    print(f"  Found {n_ant} antennas: {n_rad} radius and {n_pairs} inter-antenna measurements")
+    offdiag = ~np.isnan(m_ij) & ~np.eye(n_ant, dtype=bool)
+    n_per_ant = offdiag.sum(axis=1) + ~np.isnan(radius)
+    thin = [i for i in range(n_ant) if n_per_ant[i] < 3]
+    if thin:
+        print(
+            "  WARNING: fewer than 3 measurements to antenna(s) "
+            + ", ".join(f"{i} ({n_per_ant[i]})" for i in thin)
+            + "; their positions are poorly constrained or not at all."
+        )
 
     # --- Load initial positions ---
     if args.positions:
@@ -216,6 +278,48 @@ def main():
 
     # --- Diagnostics ---
     print_residual_report(result, radius, m_ij, n_ant)
+    if excl_radii or excl_pairs:
+        r_all, _, _ = compute_residuals(result, radius_all, m_ij_all, n_ant)
+        print("\nExcluded measurements (not fitted), residual against the solution:")
+        for i in sorted(excl_radii):
+            print(f"  r[{i}] = {r_all[i]:+.1f}")
+        x = result_to_positions(result, n_ant)
+        for i, j in sorted(excl_pairs):
+            res_ij = np.hypot(*(x[i] - x[j])) - m_ij_all[i, j]
+            print(f"  res[{i},{j}] = {res_ij:+.1f}")
+
+    # --- Per-team statistics (colour-coded cells) ---
+    team_rows = None
+    if not args.no_teams or args.measurements_csv:
+        try:
+            radius_colours, pair_colours = load_cell_colours(
+                args.measurements, n_ant, sheet=args.sheet
+            )
+        except Exception as exc:  # colours are a bonus; never fail the calibration
+            print(f"\nCould not read cell colours for team statistics: {exc}")
+        else:
+            team_rows = measurement_table(
+                result,
+                radius,
+                m_ij,
+                n_ant,
+                radius_colours,
+                pair_colours,
+                names=parse_team_names(args.team),
+                radius_all=radius_all,
+                m_ij_all=m_ij_all,
+            )
+            colours = {r["colour"] for r in team_rows} - set(NO_COLOUR)
+            if args.no_teams:
+                pass
+            elif colours:
+                print_team_report(team_rows)
+            else:
+                print("\n(No colour-coded cells found, so no per-team statistics.)")
+            if args.measurements_csv:
+                csv_path = _titled(args.measurements_csv)
+                write_measurements_csv(team_rows, csv_path)
+                print(f"Per-measurement table written to {csv_path}")
 
     # --- Plots ---
     if not args.no_plots:
@@ -232,3 +336,9 @@ def main():
         plot_path = _titled(os.path.join(args.plot_dir, "residual_histogram.png"))
         plot_residual_histogram(ij_res, plot_path)
         print(f"Saved {os.path.basename(plot_path)} to {args.plot_dir}")
+
+        if team_rows is not None and not args.no_teams:
+            if {r["colour"] for r in team_rows} - set(NO_COLOUR):
+                plot_path = _titled(os.path.join(args.plot_dir, "team_residuals.png"))
+                plot_team_residuals(team_rows, plot_path)
+                print(f"Saved {os.path.basename(plot_path)} to {args.plot_dir}")

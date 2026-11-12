@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added
+
+- Per-team statistics for colour-coded surveys (`tart_position_cal.teams`):
+  the cell background colours are read from the .ods file and the report
+  ranks each team by the leverage-corrected errors of its measurements,
+  with outlier counts and each team's worst measurements.  New CLI options
+  `--team COLOUR=NAME`, `--no-teams` and `--measurements-csv`; histogram
+  `team_residuals.png`.
+- `--exclude` CLI option (`parse_exclusions` / `apply_exclusions`): leave
+  named radius or pair measurements out of the fit; they are still scored
+  in the per-team statistics.
+- `--sheet` CLI option / `load_measurements(path, sheet=...)` to read
+  measurements from a worksheet other than `Sheet1`.
+
+### Fixed
+
+- Partial surveys: blank radius cells no longer turn the whole solution
+  into NaN; unmeasured radii are left out of the fit, the IRLS scale
+  estimate and the chirality normalisation.
+- Cells carrying field annotations (e.g. `499**`) are read as their leading
+  number with a warning instead of aborting the load.
+
 ## [0.2.0] - 2026-06-30
 
 ### Added
